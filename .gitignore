@@ -1,0 +1,39 @@
+# 构建产物
+build/
+build-*/
+dist/
+out/
+
+# Qt 生成物
+*.pro.user
+*.pro.user.*
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+*.qm
+
+# 编译中间件
+*.o
+*.obj
+*.a
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.exe
+*.dll
+!packaging/**/*.dll
+
+# 编辑器 / 系统
+.vs/
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+
+# AI 助手的工作目录(记忆、技能缓存),属于本机状态,不进仓库
+.workbuddy-ai/
+
+# 一次性探针编译出来的可执行文件(tools/*/ 里的 .cpp 保留,产物忽略)
+tools/*/*.exe
