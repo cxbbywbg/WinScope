@@ -20,6 +20,7 @@
 #include <QScreen>
 #include <QSettings>
 #include <QStringList>
+#include <QTimer>
 #include <QVBoxLayout>
 
 namespace ws {
@@ -30,13 +31,18 @@ constexpr int kWidth = 288;
 constexpr int kPadX = 14;
 constexpr int kPadTop = 9;
 constexpr int kPadBottom = 12;
-constexpr int kHeaderH = 18;      // 顶部品牌行
+constexpr int kHeaderH = 22;      // 顶部品牌行(要放得下右上角的置顶按钮)
 constexpr int kRowH = 24;         // 一行的文字区 + 横条
 constexpr int kRowGap = 7;
 constexpr int kBarH = 3;
 constexpr int kBarTop = 20;       // 横条相对行顶的偏移
 constexpr int kLabelWidth = 70;   // 名称列,要放得下"CPU 频率"这种
 constexpr int kGap = 8;
+
+// 置顶按钮。和标题行等高,再小就不好点了
+constexpr int kPinSize = 20;
+constexpr int kPinInset = 2;      // 钉子图形相对按钮的留白
+constexpr int kPinRadius = 4;
 
 // 第一次运行时给一组默认值,就是用户最常看的那几个
 QVector<MetricId> defaultMetrics()
@@ -113,7 +119,8 @@ MiniWindow::MiniWindow(QWidget *parent)
     // Qt::Tool 在 Windows 上就是 WS_EX_TOOLWINDOW:任务栏不占按钮、不进 Alt+Tab。
     // 小窗模式改成靠右下角托盘图标进出,和微信那类常驻程序一致
     setWindowFlags(Qt::Tool | Qt::FramelessWindowHint);
-    setMouseTracking(false);
+    // 置顶按钮要有悬停反馈,所以得收 mouseMove(窗口很小,开销可以忽略)
+    setMouseTracking(true);
 
     // 必须显式设:不设的话任务栏/托盘会退回 Qt 的默认图形,和主窗口对不上
     setWindowIcon(icons::appIcon(theme::accent()));
@@ -199,6 +206,13 @@ void MiniWindow::moveToDefaultCorner()
     move(area.right() - width() - 28, area.top() + 28);
 }
 
+QRect MiniWindow::pinRect() const
+{
+    // 贴在右上角。用 width() 而不是 kWidth,免得以后窗口宽度可调时这里忘了改
+    return QRect(width() - kPadX - kPinSize, kPadTop + (kHeaderH - kPinSize) / 2,
+                 kPinSize, kPinSize);
+}
+
 void MiniWindow::relayout()
 {
     // 没勾任何参数时也留一行位置,用来显示"右键选择参数"的提示
@@ -251,15 +265,25 @@ void MiniWindow::applyAlwaysOnTop(bool on)
         return;
     m_alwaysOnTop = on;
 
-    // setWindowFlag 会把窗口藏起来,所以改完要显式 show 回来,并且把位置补回去
-    // (Windows 上重建窗口有时会把它挪回默认位置)
-    const QPoint keep = pos();
-    setWindowFlag(Qt::WindowStaysOnTopHint, on);
-    if (!isVisible())
-        return;
-    show();
-    move(keep);
+    // 按钮状态立刻反馈,不用等窗口重建完
+    update(pinRect());
     saveSettings();
+
+    // setWindowFlag 在 Windows 上等于把原生窗口销毁再建一个。这个函数既会被右键菜单的
+    // QAction::toggled 调到、也会被图钉的 mouseRelease 调到,后者正处于事件派发过程中,
+    // 在那儿重建窗口容易踩到重入问题 —— 推到下一轮事件循环再做,人眼看不出这点延迟
+    QTimer::singleShot(0, this, [this] {
+        const QPoint keep = pos();
+        const bool wasVisible = isVisible();
+
+        setWindowFlag(Qt::WindowStaysOnTopHint, m_alwaysOnTop);
+
+        if (!wasVisible)
+            return;
+        // 重建会把窗口藏起来,位置有时也会被打回默认,所以补一次 show + move
+        show();
+        move(keep);
+    });
 }
 
 void MiniWindow::onSystemSnapshot(const SystemSnapshot &snapshot)
@@ -281,13 +305,27 @@ void MiniWindow::paintEvent(QPaintEvent *event)
     p.drawRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5));
 
     // 顶部品牌行。顺带提示怎么回到主界面 —— 无边框窗口没有标题栏,
-    // 不写一句用户找不到回去的路
+    // 不写一句用户找不到回去的路。右边要给置顶按钮让出位置,所以文字区到它左边为止
+    const QRect pin = pinRect();
+    const QRect header(kPadX, kPadTop, pin.left() - kGap - kPadX, kHeaderH);
+
     p.setFont(theme::uiFont(11));
     p.setPen(theme::textFaint());
-    p.drawText(QRect(kPadX, kPadTop, width() - 2 * kPadX, kHeaderH), Qt::AlignLeft | Qt::AlignVCenter,
-               QStringLiteral("WinScope 小窗"));
-    p.drawText(QRect(kPadX, kPadTop, width() - 2 * kPadX, kHeaderH), Qt::AlignRight | Qt::AlignVCenter,
-               QStringLiteral("双击回主界面"));
+    p.drawText(header, Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("WinScope 小窗"));
+    p.drawText(header, Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("双击回主界面"));
+
+    // 置顶按钮。开了是强调色底 + 实心钉,没开是空心钉 —— 两种状态要一眼分得出来,
+    // 否则点完不知道到底开没开
+    p.setPen(Qt::NoPen);
+    if (m_alwaysOnTop)
+        p.setBrush(theme::withAlpha(theme::accent(), m_pinHovered ? 70 : 42));
+    else
+        p.setBrush(m_pinHovered ? theme::surfaceHover() : Qt::NoBrush);
+    if (m_alwaysOnTop || m_pinHovered)
+        p.drawRoundedRect(pin, kPinRadius, kPinRadius);
+
+    icons::paintPin(p, QRectF(pin).adjusted(kPinInset, kPinInset, -kPinInset, -kPinInset),
+                    m_alwaysOnTop ? theme::accent() : theme::textDim(), m_alwaysOnTop);
 
     if (m_metrics.isEmpty()) {
         p.setFont(theme::uiFont(12));
@@ -343,13 +381,22 @@ void MiniWindow::paintEvent(QPaintEvent *event)
 
 void MiniWindow::mousePressEvent(QMouseEvent *event)
 {
-    if (event->button() == Qt::LeftButton) {
-        m_dragging = true;
-        m_dragOffset = event->globalPosition().toPoint() - frameGeometry().topLeft();
+    if (event->button() != Qt::LeftButton) {
+        QWidget::mousePressEvent(event);
+        return;
+    }
+
+    // 图钉优先:落在它上面是"切换置顶",不是"开始拖动"
+    if (pinRect().contains(event->position().toPoint())) {
+        m_pinPressed = true;
+        m_dragging = false;
         event->accept();
         return;
     }
-    QWidget::mousePressEvent(event);
+
+    m_dragging = true;
+    m_dragOffset = event->globalPosition().toPoint() - frameGeometry().topLeft();
+    event->accept();
 }
 
 void MiniWindow::mouseMoveEvent(QMouseEvent *event)
@@ -359,29 +406,64 @@ void MiniWindow::mouseMoveEvent(QMouseEvent *event)
         event->accept();
         return;
     }
+
+    // 按住左键时不更新悬停态:拖动中鼠标划过图钉会让按钮闪一下
+    if (!(event->buttons() & Qt::LeftButton)) {
+        const bool hovered = pinRect().contains(event->position().toPoint());
+        if (hovered != m_pinHovered) {
+            m_pinHovered = hovered;
+            update(pinRect());
+        }
+    }
+
     QWidget::mouseMoveEvent(event);
 }
 
 void MiniWindow::mouseReleaseEvent(QMouseEvent *event)
 {
-    if (m_dragging && event->button() == Qt::LeftButton) {
+    if (event->button() != Qt::LeftButton) {
+        QWidget::mouseReleaseEvent(event);
+        return;
+    }
+
+    if (m_pinPressed) {
+        m_pinPressed = false;
+        // 和普通按钮一样:按下之后把鼠标拖出去再松手就作废
+        if (pinRect().contains(event->position().toPoint()))
+            applyAlwaysOnTop(!m_alwaysOnTop);
+        event->accept();
+        return;
+    }
+
+    if (m_dragging) {
         m_dragging = false;
         // 松手时才存位置,拖动过程中每帧都写 QSettings 太浪费
         saveSettings();
         event->accept();
         return;
     }
+
     QWidget::mouseReleaseEvent(event);
 }
 
 void MiniWindow::mouseDoubleClickEvent(QMouseEvent *event)
 {
-    if (event->button() == Qt::LeftButton) {
+    // 图钉上的双击不算"回主界面" —— 否则双击一下既切了置顶又跑回主界面
+    if (event->button() == Qt::LeftButton && !pinRect().contains(event->position().toPoint())) {
         emit returnToMainRequested();
         event->accept();
         return;
     }
     QWidget::mouseDoubleClickEvent(event);
+}
+
+void MiniWindow::leaveEvent(QEvent *event)
+{
+    if (m_pinHovered) {
+        m_pinHovered = false;
+        update(pinRect());
+    }
+    QWidget::leaveEvent(event);
 }
 
 void MiniWindow::contextMenuEvent(QContextMenuEvent *event)

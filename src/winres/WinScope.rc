@@ -1,0 +1,50 @@
+// WinScope 的 PE 资源。
+//
+// 这里只放「shell 需要、但 Qt 运行时给不了」的东西:
+//   1. 图标 —— 资源管理器、开始菜单、桌面快捷方式显示的 exe 图标读的是
+//      PE 里的 RT_GROUP_ICON。界面上的图标是 QPainter 现画的(src/app/Icons.cpp),
+//      shell 完全看不见,所以不嵌这份资源的话「文件夹里就没有图标,启动之后才有」。
+//   2. 版本信息 —— 右键「属性 → 详细信息」里显示的版本、说明、版权。
+//
+// WinScope.ico 由 tools/make-icon 从 appIcon() 的同一份几何生成,别手工替换 ——
+// 否则资源管理器里的图标会和窗口 / 任务栏 / 托盘上那个对不上。
+//
+// 注意:本文件是 UTF-8 存的,CMakeLists 里给 windres 加了 --codepage=65001,
+// 不指定的话中文字符串会按系统 ANSI 代码页解释,出来是乱码。
+
+#include <windows.h>
+#include <winver.h>
+
+// 资源管理器取的是编号最小的那个图标组,所以用 1。
+// 别改成 IDI_APPLICATION(32512)—— 那样优先级会掉到系统默认图标后面。
+1 ICON "WinScope.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION    1, 0, 0, 0
+PRODUCTVERSION 1, 0, 0, 0
+FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+FILEFLAGS      0
+FILEOS         VOS_NT_WINDOWS32
+FILETYPE       VFT_APP
+FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // 0804 = 简体中文,04B0 = Unicode(UTF-16)
+        BLOCK "080404B0"
+        BEGIN
+            VALUE "CompanyName",      "WinScope"
+            VALUE "FileDescription",  "WinScope 系统监控工具"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "WinScope"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 WinScope"
+            VALUE "OriginalFilename", "WinScope.exe"
+            VALUE "ProductName",      "WinScope"
+            VALUE "ProductVersion",   "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END

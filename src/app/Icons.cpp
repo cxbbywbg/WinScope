@@ -3,6 +3,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
+#include <QPolygonF>
 
 #include <cmath>
 
@@ -127,48 +128,91 @@ void drawTools(QPainter &p, qreal s)
     p.drawArc(QRectF(s * 0.08, s * 0.6, s * 0.32, s * 0.32), 20 * 16, 250 * 16);
 }
 
+// 图钉(「窗口置顶」)。形状是"钉帽横线 + 向下收窄的钉身 + 一根针",
+// 在十几个像素这种尺寸下比画成立体的图钉更好认。
+//
+// 钉身别收得太窄:未置顶时它只有描边,两条边靠太近会糊成一坨,就分不出开关状态了
+void drawPin(QPainter &p, qreal s, bool filled)
+{
+    const QColor c = p.pen().color();
+    const qreal w = qMax(1.0, s * 0.10);
+    const QPen pen(c, w, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+
+    // 钉帽
+    p.setPen(pen);
+    p.setBrush(Qt::NoBrush);
+    p.drawLine(QPointF(s * 0.16, s * 0.15), QPointF(s * 0.84, s * 0.15));
+
+    // 钉身:上宽下窄的梯形
+    QPolygonF body;
+    body << QPointF(s * 0.25, s * 0.27)
+         << QPointF(s * 0.75, s * 0.27)
+         << QPointF(s * 0.60, s * 0.60)
+         << QPointF(s * 0.40, s * 0.60);
+
+    if (filled) {
+        p.setPen(Qt::NoPen);
+        p.setBrush(c);
+        p.drawPolygon(body);
+        p.setPen(pen);
+        p.setBrush(Qt::NoBrush);
+    } else {
+        p.setBrush(Qt::NoBrush);
+        p.drawPolygon(body);
+    }
+
+    // 针
+    p.drawLine(QPointF(s * 0.50, s * 0.61), QPointF(s * 0.50, s * 0.88));
+}
+
 QPixmap renderNavPixmap(Nav id, const QColor &color, int size)
 {
     const qreal dpr = 2.0;   // 直接按 2 倍画,高分屏不糊
+
+    // 这里有个坑:QPixmap 一旦设了 devicePixelRatio,QPainter 在 begin() 时就会
+    // 自己按这个比例放大坐标系。所以「setDevicePixelRatio(2) + scale(2,2)」等于
+    // 放大两次 —— 每个图标只画出左上角四分之一,还被拉满整张画布。
+    // 正确做法:DPR 还是 1 的时候手动 scale,画完再把 DPR 打上去。
     QPixmap pm(int(size * dpr), int(size * dpr));
-    pm.setDevicePixelRatio(dpr);
     pm.fill(Qt::transparent);
 
-    QPainter p(&pm);
-    p.setRenderHint(QPainter::Antialiasing, true);
-    p.scale(dpr, dpr);
-    p.setPen(QPen(color, qMax(1.3, size * 0.075), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    p.setBrush(Qt::NoBrush);
+    {
+        QPainter p(&pm);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.scale(dpr, dpr);
+        p.setPen(QPen(color, qMax(1.3, size * 0.075), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.setBrush(Qt::NoBrush);
 
-    const qreal s = size;
-    switch (id) {
-    case Nav::Dashboard:
-        drawDashboard(p, s);
-        break;
-    case Nav::Processes:
-        drawProcesses(p, s);
-        break;
-    case Nav::Performance:
-        drawPerformance(p, s);
-        break;
-    case Nav::Network:
-        drawNetwork(p, s);
-        break;
-    case Nav::Startup:
-        drawStartup(p, s);
-        break;
-    case Nav::Services:
-        drawServices(p, s);
-        break;
-    case Nav::System:
-        drawSystem(p, s);
-        break;
-    case Nav::Tools:
-        drawTools(p, s);
-        break;
-    }
-    p.end();
+        const qreal s = size;
+        switch (id) {
+        case Nav::Dashboard:
+            drawDashboard(p, s);
+            break;
+        case Nav::Processes:
+            drawProcesses(p, s);
+            break;
+        case Nav::Performance:
+            drawPerformance(p, s);
+            break;
+        case Nav::Network:
+            drawNetwork(p, s);
+            break;
+        case Nav::Startup:
+            drawStartup(p, s);
+            break;
+        case Nav::Services:
+            drawServices(p, s);
+            break;
+        case Nav::System:
+            drawSystem(p, s);
+            break;
+        case Nav::Tools:
+            drawTools(p, s);
+            break;
+        }
+    }   // 必须先让 painter 析构,再改 DPR
 
+    pm.setDevicePixelRatio(dpr);
     return pm;
 }
 
@@ -187,6 +231,22 @@ QIcon appIcon(const QColor &color)
     for (int size : { 16, 20, 24, 32, 48, 64, 128, 256 })
         icon.addPixmap(renderNavPixmap(Nav::Dashboard, color, size));
     return icon;
+}
+
+void paintPin(QPainter &p, const QRectF &box, const QColor &color, bool filled)
+{
+    // 钉子是方的。box 给成方的就照用,给成长方形就取中间最大的正方形,
+    // 免得画出来被拉变形
+    const qreal s = qMin(box.width(), box.height());
+    if (s <= 0.0)
+        return;
+
+    p.save();
+    p.translate(box.center() - QPointF(s / 2.0, s / 2.0));
+    p.setPen(QPen(color, qMax(1.0, s * 0.095), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setBrush(Qt::NoBrush);
+    drawPin(p, s, filled);
+    p.restore();
 }
 
 } // namespace icons

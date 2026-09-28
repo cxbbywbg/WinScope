@@ -11,6 +11,8 @@ set(CMAKE_INCLUDE_CURRENT_DIR ON)
 # 关掉图形界面只编采样层,方便在没有显示器/CI 的环境里验证 Win32 读数
 option(WINSCOPE_BUILD_GUI "构建 WinScope 图形界面主程序" ON)
 option(WINSCOPE_BUILD_SELFTEST "构建采样层自检工具(tools/selftest)" OFF)
+# 只有改动了 Icons.cpp 里的图标几何才需要开,平时不用编
+option(WINSCOPE_BUILD_ICONTOOL "构建 .ico 生成工具(tools/make-icon)" OFF)
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core Gui Widgets Network)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Gui Widgets Network)
@@ -80,6 +82,13 @@ set(WINSCOPE_WIN_LIBS
 
 # ------------------------------------------------------------------ 图形界面
 if (WINSCOPE_BUILD_GUI)
+    # PE 资源:资源管理器里的 exe 图标、右键「属性 → 详细信息」都要靠它。
+    # 界面图标是 QPainter 现画的,shell 读不到 —— 没有这份资源,文件夹里就没图标。
+    # .ico 由 tools/make-icon 从 Icons.cpp 的同一份几何生成,见该目录注释。
+    set(WINSCOPE_WIN_RESOURCES
+        src/winres/WinScope.rc
+    )
+
     set(WINSCOPE_GUI_SOURCES
         src/main.cpp
 
@@ -139,9 +148,13 @@ if (WINSCOPE_BUILD_GUI)
         ${WINSCOPE_GUI_HEADERS}
         ${WINSCOPE_CORE_SOURCES}
         ${WINSCOPE_CORE_HEADERS}
+        ${WINSCOPE_WIN_RESOURCES}
     )
 
-    target_include_directories(WinScope PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_include_directories(WinScope PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/winres   # windres 靠它找到 .rc 里引用的 .ico
+    )
 
     target_link_libraries(WinScope PRIVATE
         Qt${QT_VERSION_MAJOR}::Core
@@ -154,6 +167,13 @@ if (WINSCOPE_BUILD_GUI)
     if (MSVC)
         # 源码是 UTF-8,不加这个参数会把中文字面量当成 ANSI
         target_compile_options(WinScope PRIVATE /utf-8)
+    endif()
+
+    # 编译 .rc 要显式打开 RC 语言(project() 只声明了 CXX)
+    enable_language(RC)
+    if (NOT MSVC)
+        # .rc 是 UTF-8 存的,windres 默认按系统 ANSI 代码页读,不指定会出乱码
+        string(APPEND CMAKE_RC_FLAGS " --codepage=65001")
     endif()
 
     install(TARGETS WinScope RUNTIME DESTINATION bin)
@@ -174,5 +194,21 @@ if (WINSCOPE_BUILD_SELFTEST)
     )
     if (MSVC)
         target_compile_options(sampler_selftest PRIVATE /utf-8)
+    endif()
+endif()
+
+# ------------------------------------------------------------------ 图标生成
+# 把 appIcon() 那份图形导出成真正的 .ico,供 WinScope.rc 嵌进 PE。
+# 单独一个开关,因为它只在图标几何变了的时候才需要重跑一次。
+if (WINSCOPE_BUILD_ICONTOOL)
+    add_executable(make_icon
+        tools/make-icon/make_icon.cpp
+        src/app/Icons.cpp
+        src/app/Icons.h
+    )
+    target_include_directories(make_icon PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(make_icon PRIVATE Qt${QT_VERSION_MAJOR}::Gui)
+    if (MSVC)
+        target_compile_options(make_icon PRIVATE /utf-8)
     endif()
 endif()

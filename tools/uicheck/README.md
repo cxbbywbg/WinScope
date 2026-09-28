@@ -133,3 +133,14 @@ python tools/uicheck/traycheck.py $PID click         # 模拟左键单击托盘�
 - **`zoom.py` 的缩放倍数只吃整数**,传 `1.6` 直接 `ValueError`。
 - **`removeWidget` 不会隐藏控件**。Qt 里把控件从布局里摘掉后它还是父对象的子控件,
   会停在原来的位置继续画,必须先 `hide()` 再 `deleteLater()`。
+- **hover / 拖动这类"鼠标移动"语义,`PostMessage` 合成消息驱动不了**。点击可以
+  (`WM_LBUTTONDOWN/UP` 能进 `mousePressEvent`),但 `WM_MOUSEMOVE` 喂不进 Qt 的
+  `mouseMoveEvent` —— 得用 `SetCursorPos` 移真实光标。
+- **光标一步跳进窗口,Qt 只发 `Enter` 不发 `MouseMove`**(它认为"导致进入的那一次移动"
+  已经由 Enter 表达了)。要**分十几小步**挪进去,窗口内才会产生 move。
+- **`SetWindowPos` 别忘了去掉 `SWP_NOMOVE`**,否则窗口根本没动,光标落在别的窗口上,
+  结论全错。测之前用 `WindowFromPoint` 确认光标真的在目标窗口上。
+- **`PrintWindow` 有时只画出左半截**(不止是"上半截")。拿这种图当基准比像素会得出
+  相反的结论 —— 抓完先校验右侧有内容,不合格就重试。
+- 上面这些连同"拖动只能验位移比例、不能验绝对位移"的完整说明在技能
+  `qt-gui-visual-verify` 里。

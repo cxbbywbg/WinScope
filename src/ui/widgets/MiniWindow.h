@@ -8,6 +8,7 @@
 //
 // 交互:
 //   左键拖动   移动窗口(无边框,没有标题栏可拖)
+//   标题栏右上角的图钉  切换「窗口置顶」(点图钉不会误触发拖动)
 //   双击       回到主界面
 //   右键       菜单(选择参数 / 返回主界面 / 置顶 / 退出)
 //
@@ -66,6 +67,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent *event) override;
     void contextMenuEvent(QContextMenuEvent *event) override;
+    void leaveEvent(QEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
 
 private:
@@ -74,6 +76,8 @@ private:
     void loadSettings();
     void saveSettings() const;
     void moveToDefaultCorner();
+    // 标题栏右上角那个图钉的点击区
+    QRect pinRect() const;
 
     QVector<MetricId> m_metrics;
     SystemSnapshot m_snapshot;
@@ -83,6 +87,10 @@ private:
     QPoint m_savedPosition;
     bool m_dragging = false;
     bool m_alwaysOnTop = true;
+    // 鼠标是不是停在图钉上(画悬停底板用)
+    bool m_pinHovered = false;
+    // 这一次按下是不是落在图钉上。松手时要靠它决定"存不存位置"
+    bool m_pinPressed = false;
     bool m_quitting = false;
 };
 

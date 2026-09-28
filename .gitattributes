@@ -1,0 +1,14 @@
+# 行尾统一规则。
+#
+# 本机(以及很多 Windows 机器)的 core.autocrlf=true,git 会把仓库里的 LF 在签出时换成
+# CRLF。对 .cpp / .h 无所谓,但对 shell 脚本是致命的:带 \r 的脚本在 Git Bash / Linux 上
+# 会报 "$'\r': command not found",shebang 也失效。所以这里显式钉死成 LF。
+
+*.sh    text eol=lf
+*.py    text eol=lf
+*.nsi   text eol=lf
+
+# 二进制资源别让 git 去"规范化"行尾,否则文件会被改坏。
+*.ico   binary
+*.bmp   binary
+*.png   binary

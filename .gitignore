@@ -4,6 +4,9 @@ build-*/
 dist/
 out/
 
+# 打包工具的下载缓存(NSIS 免安装版)与一次性探针
+.tools/
+
 # Qt 生成物
 *.pro.user
 *.pro.user.*
