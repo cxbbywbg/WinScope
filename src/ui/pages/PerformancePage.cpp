@@ -397,8 +397,18 @@ void PerformancePage::updateGpuColumn(int index, const GpuInfo &gpu)
     if (title != col.lastTitle) {
         col.lastTitle = title;
         col.card->setTitle(title);
-        col.card->setHint(QStringLiteral("%1 · 最近 60 秒")
-                              .arg(gpu.integrated ? QStringLiteral("核显") : QStringLiteral("独显")));
+    }
+
+    // 说明行:核显/独显 + 温度读不到时的原因。温度不可用时数值栏留空,
+    // 但必须在说明里写清为什么,不做"静默显示空数据"
+    const QString hint = gpu.temperatureC < 0.0
+        ? QStringLiteral("%1 · 最近 60 秒 · 该卡温度读不到(厂商接口未提供),温度行留空")
+              .arg(gpu.integrated ? QStringLiteral("核显") : QStringLiteral("独显"))
+        : QStringLiteral("%1 · 最近 60 秒")
+              .arg(gpu.integrated ? QStringLiteral("核显") : QStringLiteral("独显"));
+    if (hint != col.lastHint) {
+        col.lastHint = hint;
+        col.card->setHint(hint);
     }
 
     col.chart->append(col.seriesUsage, gpu.usagePercent);
@@ -409,9 +419,9 @@ void PerformancePage::updateGpuColumn(int index, const GpuInfo &gpu)
                           gpu.memoryPercent >= 90.0 ? theme::danger()
                                                     : (gpu.memoryPercent >= 75.0 ? theme::warn() : theme::pink()));
 
-    // ---- 温度:走厂商 SDK(ADL/NVML/NVAPI),没有通用接口,读不到就显示不可用
+    // ---- 温度:走厂商 SDK(ADL/NVML/NVAPI),没有通用接口,读不到就留空
     if (gpu.temperatureC < 0.0) {
-        col.temperatureBar->setValue(0.0, QStringLiteral("不可用"), theme::textFaint());
+        col.temperatureBar->setValue(0.0, QString(), theme::textFaint());
     } else {
         col.temperatureBar->setValue(gpu.temperatureC / 100.0,
                                      QStringLiteral("%1 °C").arg(gpu.temperatureC, 0, 'f', 1),
@@ -578,19 +588,39 @@ void PerformancePage::updateCpu(const CpuInfo &cpu)
                            boosting ? theme::warn() : theme::cyan());
 
     // ---- 温度:没有"满量程"这回事,统一按 100°C 折算。
-    //      来源要标在名称列里(数值列窄,写不下),否则核显传感器读到的温度
-    //      会被当成 CPU 自己的传感器
+    //      三级回退:ACPI 热区 -> 核显传感器 -> 留空。来源要标在名称列里
+    //      (数值列窄,写不下),否则核显传感器读到的温度会被当成 CPU 自己的传感器;
+    //      彻底读不到时数值栏留空,原因写在卡片说明里,不做"静默显示空数据"
     if (cpu.temperatureSource != m_cpuTempSource) {
         m_cpuTempSource = cpu.temperatureSource;
-        const bool fromIgpu = m_cpuTempSource == CpuTemperatureSource::IntegratedGpu;
-        m_cpuTempBar->setKey(fromIgpu ? QStringLiteral("温度(核显传感器)") : QStringLiteral("温度"));
-        m_cpuDetailHint = fromIgpu
-            ? QStringLiteral("横条按各项满量程折算 · 本机无 ACPI 热区,温度取自核显传感器")
-            : QStringLiteral("横条按各项满量程折算");
-        m_cpuDetailCard->setHint(m_cpuDetailHint);
+        m_cpuTempBar->setKey(m_cpuTempSource == CpuTemperatureSource::IntegratedGpu
+                                 ? QStringLiteral("温度(核显传感器)")
+                                 : QStringLiteral("温度"));
     }
+
+    // 说明文字单独算,不能跟着上面那个"来源变了"的分支走:m_cpuTempSource 的初值就是
+    // None,如果一台机器从头到尾都读不到温度,来源永远不变,说明就会一直停在构造函数
+    // 给的默认文案上 —— 恰好把"为什么留空"漏掉,而那正是要发给别人用的场景
+    QString tempHint;
+    switch (m_cpuTempSource) {
+    case CpuTemperatureSource::AcpiThermalZone:
+        tempHint = QStringLiteral("横条按各项满量程折算");
+        break;
+    case CpuTemperatureSource::IntegratedGpu:
+        tempHint = QStringLiteral("横条按各项满量程折算 · 本机无 ACPI 热区,温度取自核显传感器");
+        break;
+    case CpuTemperatureSource::None:
+        tempHint = QStringLiteral("横条按各项满量程折算 · 本机读不到 CPU 温度:"
+                                  "固件没有实现 ACPI 热区,核显传感器也拿不到,温度行留空");
+        break;
+    }
+    if (tempHint != m_cpuDetailHint) {
+        m_cpuDetailHint = tempHint;
+        m_cpuDetailCard->setHint(tempHint);
+    }
+
     if (cpu.temperatureC < 0.0) {
-        m_cpuTempBar->setValue(0.0, QStringLiteral("不可用"), theme::textFaint());
+        m_cpuTempBar->setValue(0.0, QString(), theme::textFaint());
     } else {
         m_cpuTempBar->setValue(cpu.temperatureC / 100.0, QStringLiteral("%1 °C").arg(cpu.temperatureC, 0, 'f', 1),
                                temperatureColor(cpu.temperatureC));

@@ -49,13 +49,18 @@ public:
     // 按适配器序号取温度(摄氏度),取不到返回 -1
     double temperatureC(int index) const;
 
-    // 核显温度。核显和 CPU 核心在同一颗 die 上,拿不到 ACPI 热区时可以拿它
-    // 当 CPU 温度的参考值 —— 但界面必须标出来源,不能让人以为读到了 CPU 自己的
-    // 传感器。取不到返回 -1
-    double integratedTemperatureC() const;
+    // 能不能拿这块核显的温度当 CPU 温度的参考值。核显和 CPU 核心在同一颗 die 上,
+    // 拿不到 ACPI 热区时它是唯一合理的替代 —— 但门槛卡得很死,见 .cpp 里的说明。
+    // 取不到返回 -1,界面应当留空,绝不能退回用独显温度冒充
+    double cpuProxyTemperatureC() const;
 
     // 诊断用:当前加载成功的来源,例如 "ADL + NVML"
     QString backendSummary() const;
+
+    // 诊断/自检用:型号名看起来是不是 AMD APU 的核显。
+    // 误判的代价不对称(漏判只是温度留空,误判会把独显温度当成 CPU 温度),
+    // 所以这里宁可严。做成公开函数是为了让自检工具能用一组样本名回归验证
+    static bool nameLooksLikeApuIntegrated(const QString &adapterName);
 
 private:
     struct Impl;

@@ -127,9 +127,7 @@ void drawTools(QPainter &p, qreal s)
     p.drawArc(QRectF(s * 0.08, s * 0.6, s * 0.32, s * 0.32), 20 * 16, 250 * 16);
 }
 
-} // namespace
-
-QIcon nav(Nav id, const QColor &color, int size)
+QPixmap renderNavPixmap(Nav id, const QColor &color, int size)
 {
     const qreal dpr = 2.0;   // 直接按 2 倍画,高分屏不糊
     QPixmap pm(int(size * dpr), int(size * dpr));
@@ -171,7 +169,24 @@ QIcon nav(Nav id, const QColor &color, int size)
     }
     p.end();
 
-    return QIcon(pm);
+    return pm;
+}
+
+} // namespace
+
+QIcon nav(Nav id, const QColor &color, int size)
+{
+    return QIcon(renderNavPixmap(id, color, size));
+}
+
+QIcon appIcon(const QColor &color)
+{
+    // 窗口图标、任务栏按钮、系统托盘都从这一份来。
+    // 之前小窗没设图标,任务栏上显示的是 Qt 的默认图形,和主窗口对不上 —— 就是漏了这步
+    QIcon icon;
+    for (int size : { 16, 20, 24, 32, 48, 64, 128, 256 })
+        icon.addPixmap(renderNavPixmap(Nav::Dashboard, color, size));
+    return icon;
 }
 
 } // namespace icons

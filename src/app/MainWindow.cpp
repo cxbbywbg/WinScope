@@ -2,6 +2,7 @@
 
 #include "app/Icons.h"
 #include "app/Theme.h"
+#include "core/Metrics.h"
 #include "core/Win32Utils.h"
 #include "ui/pages/DashboardPage.h"
 #include "ui/pages/NetworkPage.h"
@@ -12,6 +13,7 @@
 #include "ui/pages/StartupPage.h"
 #include "ui/pages/SystemPage.h"
 #include "ui/pages/ToolsPage.h"
+#include "ui/widgets/MiniWindow.h"
 
 #include <QApplication>
 #include <QCloseEvent>
@@ -19,9 +21,13 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
+#include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSettings>
 #include <QStackedWidget>
+#include <QSystemTrayIcon>
+#include <QTimer>
 #include <QVBoxLayout>
 
 namespace ws {
@@ -41,6 +47,86 @@ const NavEntry kNavEntries[] = {
 };
 
 constexpr int kNavCount = int(sizeof(kNavEntries) / sizeof(kNavEntries[0]));
+
+// 托盘图标的「可见性」状态
+enum class TrayPromotion {
+    NotFound,        // 外壳还没给这个 exe 建登记条目(刚 show 出来时会这样)
+    AlreadyVisible,  // 已经登记且本来就可见,什么都不用做
+    Promoted,        // 这次把它改成可见了 —— 调用方要重加一次图标才会生效
+};
+
+// 把「自己」那个托盘图标设成默认可见。
+//
+// Windows 11 会把新注册的托盘图标丢进「隐藏的图标」浮窗里,要用户手动拖出来一次。
+// 这个开关存在外壳管的 HKCU\Control Panel\NotifyIconSettings\<id>\IsPromoted 上,
+// 没有公开 API —— 系统设置里的「其他系统托盘图标」开关改的就是它。
+//
+// 因为项目要发给别人用,总不能要求每个使用者都去手动拖一次,所以这里代劳。
+// 两条约束:
+//   1. 只改 ExecutablePath 和当前 exe 完全一致的那一条,别的程序一律不碰;
+//   2. 只做一次(调用方用 QSettings 记着),之后用户再在系统设置里关掉,我们不再管。
+TrayPromotion promoteOwnNotifyIcon()
+{
+    wchar_t exePath[MAX_PATH] = {};
+    if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0)
+        return TrayPromotion::NotFound;
+    const QString self = QString::fromWCharArray(exePath);
+
+    HKEY root = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\NotifyIconSettings", 0, KEY_READ, &root)
+        != ERROR_SUCCESS)
+        return TrayPromotion::NotFound;
+
+    TrayPromotion result = TrayPromotion::NotFound;
+    for (DWORD index = 0;; ++index) {
+        wchar_t subName[256] = {};
+        DWORD subLen = DWORD(sizeof(subName) / sizeof(subName[0]) - 1);
+        if (RegEnumKeyExW(root, index, subName, &subLen, nullptr, nullptr, nullptr, nullptr)
+            != ERROR_SUCCESS)
+            break;
+
+        HKEY sub = nullptr;
+        if (RegOpenKeyExW(root, subName, 0, KEY_READ, &sub) != ERROR_SUCCESS)
+            continue;
+
+        wchar_t stored[MAX_PATH * 2] = {};
+        DWORD storedLen = DWORD(sizeof(stored) - sizeof(wchar_t));
+        DWORD type = 0;
+        const LONG got = RegQueryValueExW(sub, L"ExecutablePath", nullptr, &type,
+                                          reinterpret_cast<LPBYTE>(stored), &storedLen);
+        RegCloseKey(sub);
+        if (got != ERROR_SUCCESS || type != REG_SZ)
+            continue;
+        if (QString::fromWCharArray(stored).compare(self, Qt::CaseInsensitive) != 0)
+            continue;
+
+        HKEY writable = nullptr;
+        if (RegOpenKeyExW(root, subName, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &writable)
+            != ERROR_SUCCESS)
+            break;
+
+        DWORD promoted = 0;
+        DWORD size = sizeof(promoted);
+        DWORD valueType = 0;
+        const bool exists = RegQueryValueExW(writable, L"IsPromoted", nullptr, &valueType,
+                                             reinterpret_cast<LPBYTE>(&promoted), &size)
+                            == ERROR_SUCCESS;
+        if (exists && promoted != 0) {
+            result = TrayPromotion::AlreadyVisible;
+        } else {
+            const DWORD one = 1;
+            const bool ok = RegSetValueExW(writable, L"IsPromoted", 0, REG_DWORD,
+                                           reinterpret_cast<const BYTE *>(&one), sizeof(one))
+                            == ERROR_SUCCESS;
+            result = ok ? TrayPromotion::Promoted : TrayPromotion::AlreadyVisible;
+        }
+        RegCloseKey(writable);
+        break;
+    }
+
+    RegCloseKey(root);
+    return result;
+}
 
 } // namespace
 
@@ -146,6 +232,11 @@ MainWindow::MainWindow(QWidget *parent)
         m_pauseButton = new QPushButton(QStringLiteral("暂停"), header);
         headerLayout->addWidget(m_pauseButton);
 
+        m_miniButton = new QPushButton(QStringLiteral("小窗模式"), header);
+        m_miniButton->setToolTip(QStringLiteral("只留一个置顶小窗显示选中的参数,\n"
+                                                "同时停掉其余通道的采集以降后台开销"));
+        headerLayout->addWidget(m_miniButton);
+
         m_elevateButton = new QPushButton(QStringLiteral("以管理员身份重启"), header);
         m_elevateButton->setObjectName(QStringLiteral("Primary"));
         m_elevateButton->setVisible(!SystemSampler::isElevated());
@@ -162,6 +253,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     buildPages();
     wireSampler();
+    buildTray();
 
     // 页面就绪后才能选中导航项(选中会触发 navigateTo)
     m_nav->setCurrentRow(0);
@@ -170,6 +262,13 @@ MainWindow::MainWindow(QWidget *parent)
 
     m_sampler->setInterval(1000);
     m_sampler->start();
+
+    // 上次退出时停在小窗模式的话这次直接进小窗 —— 小窗本来就是"常驻桌面"的用法,
+    // 每次都还要手点一下反而别扭。
+    // 用 0 延时而不能在构造函数里直接调:main() 拿到窗口后还会 show() 一次,
+    // 那一下会把这里的 hide() 抵消掉
+    if (MiniWindow::miniModeWasActive())
+        QTimer::singleShot(0, this, &MainWindow::enterMiniMode);
 }
 
 MainWindow::~MainWindow()
@@ -177,6 +276,10 @@ MainWindow::~MainWindow()
     // 采样线程里挂着 ETW 会话,必须显式回收
     if (m_sampler)
         m_sampler->stop();
+
+    // 小窗是顶层窗口,没有 parent,得自己删
+    delete m_mini;
+    m_mini = nullptr;
 }
 
 void MainWindow::buildPages()
@@ -200,19 +303,28 @@ void MainWindow::wireSampler()
     connect(m_sampler, &SystemSampler::systemSnapshotReady, this, [this](const SystemSnapshot &snapshot) {
         if (m_paused)
             return;
+        // 小窗模式下主界面是藏着的,页面不用重绘;而且采样范围收窄后部分字段
+        // 本来就是旧的,再让八个页面跑一遍布局纯属白费
+        if (m_miniMode) {
+            if (m_mini) {
+                m_mini->onSystemSnapshot(snapshot);
+                updateTrayToolTip();
+            }
+            return;
+        }
         for (PageBase *page : m_pages)
             page->onSystemSnapshot(snapshot);
     });
 
     connect(m_sampler, &SystemSampler::processSnapshotReady, this, [this](const ProcessSnapshot &snapshot) {
-        if (m_paused)
+        if (m_paused || m_miniMode)
             return;
         for (PageBase *page : m_pages)
             page->onProcessSnapshot(snapshot);
     });
 
     connect(m_sampler, &SystemSampler::connectionsReady, this, [this](const QVector<NetConnection> &connections) {
-        if (m_paused)
+        if (m_paused || m_miniMode)
             return;
         for (PageBase *page : m_pages)
             page->onConnections(connections);
@@ -230,6 +342,7 @@ void MainWindow::wireSampler()
     });
 
     connect(m_pauseButton, &QPushButton::clicked, this, &MainWindow::togglePause);
+    connect(m_miniButton, &QPushButton::clicked, this, &MainWindow::enterMiniMode);
     connect(m_elevateButton, &QPushButton::clicked, this, &MainWindow::promptElevation);
 }
 
@@ -286,6 +399,155 @@ void MainWindow::promptElevation()
         QApplication::quit();
     else
         setStatus(QStringLiteral("提权启动失败,可能被拒绝或需要输入管理员密码"), true);
+}
+
+void MainWindow::buildTray()
+{
+    if (!QSystemTrayIcon::isSystemTrayAvailable())
+        return;
+
+    // 图标和主窗口、小窗同一份,免得任务栏和托盘上两个样子
+    m_tray = new QSystemTrayIcon(icons::appIcon(theme::accent()), this);
+    m_tray->setToolTip(QStringLiteral("WinScope 小窗"));
+
+    auto *menu = new QMenu(this);
+    menu->addAction(QStringLiteral("显示主界面"), this, &MainWindow::exitMiniMode);
+    menu->addAction(QStringLiteral("选择小窗参数…"), this, [this] {
+        // 小窗还没建过就先建一个(比如启动就直接进小窗的情形)
+        if (!m_mini)
+            return;
+        m_mini->chooseMetrics();
+    });
+    menu->addSeparator();
+    menu->addAction(QStringLiteral("退出 WinScope"), this, [] { QApplication::quit(); });
+    m_tray->setContextMenu(menu);
+
+    // 左键单击/双击都回主界面 —— 小窗模式没有任务栏按钮,托盘是最顺手的入口。
+    //
+    // 但图标刚 show() 出来的那一小会儿不能理会:外壳在图标新加入时偶尔会补发一发
+    // NIN_SELECT,照单全收的话刚进的小窗会被立刻关掉(启动即进小窗那条路径上
+    // 实测遇到过一次)。给 1 秒宽限期,人不可能在这个窗口期内点到它
+    connect(m_tray, &QSystemTrayIcon::activated, this,
+            [this](QSystemTrayIcon::ActivationReason reason) {
+                if (reason != QSystemTrayIcon::Trigger && reason != QSystemTrayIcon::DoubleClick)
+                    return;
+                if (m_trayShownAt.isValid() && m_trayShownAt.elapsed() < 1000)
+                    return;
+                exitMiniMode();
+            });
+}
+
+void MainWindow::ensureTrayIconPromoted()
+{
+    if (!m_tray)
+        return;
+    // 只代劳一次。之后用户在系统设置里怎么调都随他,不再覆盖
+    if (QSettings().value(QStringLiteral("tray/promoted"), false).toBool())
+        return;
+
+    // 外壳给新图标建 NotifyIconSettings 条目是异步的,show() 之后要等一拍才查得到,
+    // 所以查不到就再等一轮,最多试 4 次
+    if (m_trayPromoteAttempt++ >= 4)
+        return;
+
+    const TrayPromotion state = promoteOwnNotifyIcon();
+    if (state == TrayPromotion::NotFound) {
+        QTimer::singleShot(1500, this, &MainWindow::ensureTrayIconPromoted);
+        return;
+    }
+
+    QSettings().setValue(QStringLiteral("tray/promoted"), true);
+    if (state != TrayPromotion::Promoted)
+        return;
+
+    // 改完注册表外壳不会立刻重读,得把图标删掉再加一次。
+    // 这一步会闪一下,但一辈子只发生一次
+    m_tray->hide();
+    QTimer::singleShot(200, this, [this] {
+        if (m_tray && m_miniMode) {
+            m_tray->show();
+            m_trayShownAt.start();
+        }
+    });
+}
+
+void MainWindow::updateTrayToolTip()
+{
+    if (!m_tray || !m_mini)
+        return;
+
+    const QString tip = m_mini->trayToolTip();
+    // 每秒都写一次托盘会白白惊动一次外壳进程,文字没变就别写
+    if (tip == m_trayTip)
+        return;
+    m_trayTip = tip;
+    m_tray->setToolTip(tip);
+}
+
+void MainWindow::enterMiniMode()
+{
+    if (m_miniMode)
+        return;
+
+    if (!m_mini) {
+        // 刻意不给 parent:父窗口一藏,子窗口会跟着藏,小窗模式就变成
+        // "什么都看不见"了。生命周期由 ~MainWindow 手工收
+        m_mini = new MiniWindow(nullptr);
+        connect(m_mini, &MiniWindow::returnToMainRequested, this, &MainWindow::exitMiniMode);
+        connect(m_mini, &MiniWindow::quitRequested, this, [] { QApplication::quit(); });
+        // 改了小窗勾选的参数,采样范围要跟着重算
+        connect(m_mini, &MiniWindow::metricsChanged, this, &MainWindow::applySampleScope);
+    }
+
+    m_miniMode = true;
+    MiniWindow::setMiniModeActive(true);
+
+    m_mini->show();
+    m_mini->raise();
+    applySampleScope();
+
+    hide();
+
+    // 主界面藏了、小窗又是 Qt::Tool,这时候整个进程在任务栏上一点痕迹都没有。
+    // 托盘图标必须跟着出来,否则用户就找不着入口了
+    if (m_tray) {
+        m_tray->show();
+        m_trayShownAt.start();
+        updateTrayToolTip();
+        ensureTrayIconPromoted();
+    }
+}
+
+void MainWindow::exitMiniMode()
+{
+    if (!m_miniMode)
+        return;
+
+    m_miniMode = false;
+    MiniWindow::setMiniModeActive(false);
+    if (m_mini)
+        m_mini->hide();
+    if (m_tray)
+        m_tray->hide();
+
+    show();
+    raise();
+    activateWindow();
+    applySampleScope();
+}
+
+void MainWindow::applySampleScope()
+{
+    if (!m_sampler)
+        return;
+
+    // 小窗模式下只开勾选的那几项需要的数据,其余通道整拍跳过。
+    // 回到主界面就全开
+    const SampleScope scope = (m_miniMode && m_mini) ? scopeForMetrics(m_mini->metrics())
+                                                     : sampleScopeAll();
+    m_sampler->setScope(scope);
+    // 顺手补一拍,免得刚展开的页面要等满一个刷新周期才有新数据
+    m_sampler->refreshNow();
 }
 
 void MainWindow::setStatus(const QString &text, bool isError)

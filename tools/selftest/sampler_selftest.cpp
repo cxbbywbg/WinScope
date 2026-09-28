@@ -10,6 +10,7 @@
 #include "core/DiskSampler.h"
 #include "core/GpuSampler.h"
 #include "core/MemorySampler.h"
+#include "core/Metrics.h"
 #include "core/NetConnectionSampler.h"
 #include "core/NetProcessMonitor.h"
 #include "core/NetSampler.h"
@@ -22,6 +23,7 @@
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QSet>
 #include <QTextStream>
 #include <QThread>
 
@@ -375,6 +377,187 @@ void testSystemInfo()
 
 } // namespace
 
+// ---------------------------------------------------------------- APU 核显名白名单回归
+
+// CPU 温度能不能退到核显传感器,全看这个白名单。误判的代价不对称
+// (漏判只是温度留空,误判会把独显温度当成 CPU 温度显示出去),所以拿一组
+// 真实型号名当样本跑一遍。样本里既有该判成核显的,也有"绝不能判成核显"的
+namespace {
+
+void testApuNameWhitelist(const ThermalProvider &thermal)
+{
+    section(QStringLiteral("APU 核显名白名单"));
+
+    struct Sample {
+        const char *name;
+        bool integrated;
+    };
+    static const Sample kSamples[] = {
+        // ---- 该判成核显
+        { "AMD Radeon(TM) Graphics", true },          // 驱动报不出具体型号时的占位名
+        { "AMD Radeon Graphics", true },
+        { "AMD Radeon(TM) Vega 8 Graphics", true },   // Raven Ridge
+        { "AMD Radeon Vega 11 Graphics", true },      // 2400G
+        { "AMD Radeon 680M", true },                  // Rembrandt
+        { "AMD Radeon 780M", true },                  // Phoenix
+        { "AMD Radeon 890M", true },                  // Strix Point
+        // ---- 绝不能判成核显
+        { "NVIDIA GeForce RTX 2060", false },
+        { "Intel(R) UHD Graphics 630", false },
+        { "AMD Radeon RX 6600M", false },             // 移动版独显,也带 M 结尾
+        { "AMD Radeon RX 5700 XT", false },
+        { "AMD Radeon RX Vega 64", false },           // 和 Vega 核显只差 RX 前缀
+        { "AMD Radeon Pro WX 3200", false },
+        { "AMD Radeon VII", false },
+        { "AMD Radeon HD 8750M", false },
+        { "", false },
+    };
+    constexpr int kSampleCount = int(sizeof(kSamples) / sizeof(kSamples[0]));
+
+    int failed = 0;
+    for (const Sample &s : kSamples) {
+        const QString name = QString::fromLatin1(s.name);
+        const bool got = ThermalProvider::nameLooksLikeApuIntegrated(name);
+        const bool pass = (got == s.integrated);
+        if (!pass)
+            ++failed;
+        row(QStringLiteral("  %1").arg(s.integrated ? QStringLiteral("核显  ") : QStringLiteral("非核显")),
+            QStringLiteral("%1 %2").arg(pass ? QStringLiteral("OK  ") : QStringLiteral("FAIL"),
+                                        name.isEmpty() ? QStringLiteral("(空名)") : name));
+    }
+    row(QStringLiteral("回归结果"),
+        failed == 0 ? QStringLiteral("全部通过(%1 个样本)").arg(kSampleCount)
+                    : QStringLiteral("%1 / %2 失败").arg(failed).arg(kSampleCount));
+
+    // 这台机器上到底走没走通兜底路径,直接给一句结论
+    const double proxy = thermal.cpuProxyTemperatureC();
+    row(QStringLiteral("CPU 温度代理"),
+        proxy < 0.0 ? QStringLiteral("不可用(界面温度行留空)")
+                    : QStringLiteral("%1 °C").arg(proxy, 0, 'f', 1));
+}
+
+// ---------------------------------------------------------------- 指标注册表
+
+// 小窗能显示哪些指标、各自需要哪几路采样,全在 Metrics.cpp 那张表里。
+// 这张表一旦和取值函数对不上,表现是"小窗显示空白或者旧值",很难查。所以回归两件事:
+//   1. 取值函数读了自己没声明需要的通道
+//   2. key 重复或者含非 ASCII(key 要写进 QSettings,坏了会静默丢配置)
+void testMetricRegistry()
+{
+    section(QStringLiteral("小窗指标注册表"));
+
+    // 造一份"每个字段都有值"的假快照当基准。用假数据而不是真采样,
+    // 是为了让这条回归在任何机器上都跑出同样的结果
+    SystemSnapshot filled;
+    filled.valid = true;
+    filled.cpu.usage = 42.5;
+    filled.cpu.currentMHz = 3200.0;
+    filled.cpu.baseMHz = 2900.0;
+    filled.cpu.maxMHz = 2900.0;
+    filled.cpu.maxClockMHz = 2900.0;
+    filled.cpu.temperatureC = 58.0;
+    filled.cpu.powerW = 35.0;
+    filled.cpu.uptimeSeconds = 123456.0;
+    filled.memory.usagePercent = 63.5;
+    filled.gpu.present = true;
+    filled.gpu.name = QStringLiteral("Test Adapter");
+    filled.gpu.usagePercent = 27.0;
+    filled.gpu.temperatureC = 61.0;
+    filled.net.rxBytesPerSec = 512.0 * 1024.0;
+    filled.net.txBytesPerSec = 128.0 * 1024.0;
+    filled.disk.activePercent = 12.0;
+
+    // ---- key 的合法性
+    QSet<QString> seenKeys;
+    int keyProblems = 0;
+    for (const MetricDef &def : metricDefs()) {
+        bool ok = !def.key.isEmpty();
+        for (const QChar c : def.key) {
+            if (!c.isLetterOrNumber() && c != QLatin1Char('_'))
+                ok = false;
+        }
+        if (seenKeys.contains(def.key))
+            ok = false;   // 重复的 key 会让两个指标互相覆盖
+        if (!ok)
+            ++keyProblems;
+        seenKeys.insert(def.key);
+    }
+    row(QStringLiteral("key 唯一且是 ASCII"),
+        keyProblems == 0 ? QStringLiteral("通过(%1 个)").arg(int(metricDefs().size()))
+                         : QStringLiteral("%1 个有问题").arg(keyProblems));
+
+    // ---- 声明的通道必须覆盖取值函数真正读到的字段。
+    //      做法:把"这个指标没声明需要"的通道对应字段清空,再看取值有没有变
+    int scopeProblems = 0;
+    for (const MetricDef &def : metricDefs()) {
+        SystemSnapshot probe = filled;
+        for (SampleScope::Bit bit : { SampleScope::Cpu, SampleScope::Memory, SampleScope::Gpu,
+                                      SampleScope::Disk, SampleScope::Network }) {
+            if (def.channels & quint32(bit))
+                continue;
+            switch (bit) {
+            case SampleScope::Cpu:
+                probe.cpu = CpuInfo{};
+                break;
+            case SampleScope::Memory:
+                probe.memory = MemoryInfo{};
+                break;
+            case SampleScope::Gpu:
+                probe.gpu = GpuInfo{};
+                probe.gpus.clear();
+                break;
+            case SampleScope::Disk:
+                probe.disk = DiskInfo{};
+                break;
+            case SampleScope::Network:
+                probe.net = NetInfo{};
+                break;
+            default:
+                break;
+            }
+        }
+
+        const MetricValue expected = def.read(filled);
+        const MetricValue got = def.read(probe);
+        // ratio 可能是 -1,两边都加 2 再比,避开 qFuzzyCompare 对 0 附近的坑
+        const bool same = expected.text == got.text
+            && qFuzzyCompare(expected.ratio + 2.0, got.ratio + 2.0);
+        if (!same)
+            ++scopeProblems;
+        row(QStringLiteral("  ") + def.label,
+            QStringLiteral("%1 通道=0x%2  值=%3")
+                .arg(same ? QStringLiteral("OK  ") : QStringLiteral("FAIL"))
+                .arg(def.channels, 0, 16)
+                .arg(expected.text.isEmpty() ? QStringLiteral("(空)") : expected.text));
+    }
+    row(QStringLiteral("通道覆盖"),
+        scopeProblems == 0
+            ? QStringLiteral("通过 —— 取值函数没读没声明的通道")
+            : QStringLiteral("%1 个指标读了没声明的通道").arg(scopeProblems));
+
+    // ---- 范围合并
+    const SampleScope cpuMem = scopeForMetrics({ MetricId::CpuUsage, MetricId::MemoryUsage });
+    const SampleScope net = scopeForMetrics({ MetricId::NetworkThroughput });
+    const bool unionOk = cpuMem.test(SampleScope::Cpu) && cpuMem.test(SampleScope::Memory)
+        && !cpuMem.test(SampleScope::Gpu) && !cpuMem.test(SampleScope::Disk)
+        && !cpuMem.test(SampleScope::Network) && !cpuMem.test(SampleScope::Processes)
+        && net.test(SampleScope::Network) && !net.test(SampleScope::Cpu)
+        && scopeForMetrics({}).isEmpty();
+    row(QStringLiteral("范围合并"), unionOk ? QStringLiteral("通过") : QStringLiteral("失败"));
+
+    // 小窗是"看指标"用的,不该把进程快照那路最贵的采样拉进来
+    bool anyNeedsProcesses = false;
+    for (const MetricDef &def : metricDefs()) {
+        if (def.channels & quint32(SampleScope::Processes))
+            anyNeedsProcesses = true;
+    }
+    row(QStringLiteral("有没有指标要进程快照"),
+        anyNeedsProcesses ? QStringLiteral("有 —— 小窗会白采最贵的一路")
+                          : QStringLiteral("没有(符合预期)"));
+}
+
+} // namespace
+
 int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
@@ -391,6 +574,9 @@ int main(int argc, char *argv[])
     const bool thermalOk = thermal.load();
     row(QStringLiteral("温度来源"), thermal.backendSummary());
     row(QStringLiteral("温度层可用"), thermalOk ? QStringLiteral("是") : QStringLiteral("否"));
+
+    testApuNameWhitelist(thermal);
+    testMetricRegistry();
 
     QElapsedTimer total;
     total.start();

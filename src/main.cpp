@@ -42,8 +42,11 @@ int main(int argc, char *argv[])
     // 失败也无所谓,进程列表照样能看,只是部分字段是「—」。
     ws::enableDebugPrivilege();
 
+    // 应用图标只在这一处定:主窗口、小窗、模态对话框、任务栏、托盘全从它派生。
+    // 以前只给主窗口 setWindowIcon,小窗没设,任务栏上就露出了 Qt 的默认图形
+    QApplication::setWindowIcon(ws::icons::appIcon(ws::theme::accent()));
+
     ws::MainWindow window;
-    window.setWindowIcon(ws::icons::nav(ws::icons::Nav::Dashboard, ws::theme::accent(), 64));
     window.show();
 
     return app.exec();

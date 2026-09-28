@@ -24,6 +24,57 @@ inline LoadLevel levelFor(double percent)
     return LoadLevel::Normal;
 }
 
+// ---------------------------------------------------------------- 采样范围
+
+// 采样通道。
+//
+// 小窗模式下只开需要的几路,其余整拍跳过。省下来的主要是这两项:
+//   · 进程快照 —— 要枚举全系统句柄,还要为每个进程查路径/命令行/属主
+//   · 连接表   —— TCP/UDP 全表枚举
+// 用位掩码而不是一堆 bool 参数:"要哪几路"这个集合是由小窗勾了哪些指标算出来的,
+// 位运算组合最省事,整包比较也方便
+class SampleScope
+{
+public:
+    enum Bit : quint32 {
+        Cpu = 1u << 0,
+        Memory = 1u << 1,
+        Gpu = 1u << 2,
+        Disk = 1u << 3,
+        Network = 1u << 4,
+        Processes = 1u << 5,
+        All = Cpu | Memory | Gpu | Disk | Network | Processes,
+    };
+
+    constexpr SampleScope() = default;
+    constexpr SampleScope(Bit bit) : m_mask(quint32(bit)) {}
+    constexpr explicit SampleScope(quint32 mask) : m_mask(mask) {}
+
+    constexpr quint32 mask() const { return m_mask; }
+    constexpr bool test(Bit bit) const { return (m_mask & quint32(bit)) != 0; }
+    constexpr bool isEmpty() const { return m_mask == 0; }
+
+    constexpr SampleScope operator|(const SampleScope &other) const
+    {
+        return SampleScope(m_mask | other.m_mask);
+    }
+    SampleScope &operator|=(const SampleScope &other)
+    {
+        m_mask |= other.m_mask;
+        return *this;
+    }
+    constexpr bool operator==(const SampleScope &other) const { return m_mask == other.m_mask; }
+    constexpr bool operator!=(const SampleScope &other) const { return m_mask != other.m_mask; }
+
+private:
+    quint32 m_mask = 0;
+};
+
+inline constexpr SampleScope sampleScopeAll()
+{
+    return SampleScope(quint32(SampleScope::All));
+}
+
 // ---------------------------------------------------------------- CPU
 
 // CPU 温度的来源。Windows 上真正能读到"CPU 温度"的只有 ACPI 热区

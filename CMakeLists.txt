@@ -35,6 +35,7 @@ set(WINSCOPE_CORE_SOURCES
     src/core/ServiceManager.cpp
     src/core/StartupManager.cpp
     src/core/SystemInfo.cpp
+    src/core/Metrics.cpp
     src/core/SystemSampler.cpp
 )
 
@@ -57,6 +58,7 @@ set(WINSCOPE_CORE_HEADERS
     src/core/ServiceManager.h
     src/core/StartupManager.h
     src/core/SystemInfo.h
+    src/core/Metrics.h
     src/core/SystemSampler.h
 )
 
@@ -93,6 +95,7 @@ if (WINSCOPE_BUILD_GUI)
         src/ui/widgets/FlowLayout.cpp
         src/ui/widgets/BarRow.cpp
         src/ui/widgets/SegmentBar.cpp
+        src/ui/widgets/MiniWindow.cpp
 
         src/ui/pages/DashboardPage.cpp
         src/ui/pages/ProcessPage.cpp
@@ -119,6 +122,7 @@ if (WINSCOPE_BUILD_GUI)
         src/ui/widgets/FlowLayout.h
         src/ui/widgets/BarRow.h
         src/ui/widgets/SegmentBar.h
+        src/ui/widgets/MiniWindow.h
 
         src/ui/pages/DashboardPage.h
         src/ui/pages/ProcessPage.h

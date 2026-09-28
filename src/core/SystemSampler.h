@@ -10,6 +10,10 @@
 //   每拍      进程快照
 //   每 5 拍   连接表(TCP/UDP)
 //   每 30 拍  分区容量
+//
+// 以上都是"全开"时的情况。setScope() 可以关掉其中几路,小窗模式就靠它把
+// 后台开销压下去 —— 关掉的通道整拍不采样,但**不会清空数据**,沿用上一帧的值,
+// 这样用户从小窗切回主界面时不会看到一片空白
 
 #include "core/NetConnectionSampler.h"
 #include "core/Types.h"
@@ -38,6 +42,10 @@ public:
     void setInterval(int ms);
     int interval() const { return m_intervalMs; }
 
+    // 采样范围。默认全开
+    void setScope(SampleScope scope);
+    SampleScope scope() const { return m_scope; }
+
     // 当前进程是否以管理员身份运行
     static bool isElevated();
 
@@ -59,6 +67,7 @@ private:
     QThread *m_thread = nullptr;
     SamplerWorker *m_worker = nullptr;
     int m_intervalMs = 1000;
+    SampleScope m_scope = sampleScopeAll();
     bool m_netMonitorRunning = false;
     QString m_netMonitorError;
 };

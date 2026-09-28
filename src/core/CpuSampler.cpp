@@ -195,8 +195,10 @@ void CpuSampler::resolveTemperature()
 
     // 没实现 ACPI 热区,退一步用核显传感器。核显和 CPU 核心在同一颗 die 上,
     // 读到的是这颗芯片的温度,当参考值是合理的 —— 但界面上必须标出来源,
-    // 不能让人以为这是 CPU 自己的传感器
-    if (m_thermal && m_thermal->integratedTemperatureC() >= 0.0) {
+    // 不能让人以为这是 CPU 自己的传感器。
+    // 门槛卡在 ThermalProvider 里(只认 ADL 读数 + AMD APU 核显型号名),
+    // 拿不到就返回 -1,界面留空,绝不退回用独显温度冒充
+    if (m_thermal && m_thermal->cpuProxyTemperatureC() >= 0.0) {
         m_temperatureSource = CpuTemperatureSource::IntegratedGpu;
         return;
     }
@@ -211,7 +213,7 @@ double CpuSampler::currentTemperatureC() const
         return m_acpiTemperatureC;
     case CpuTemperatureSource::IntegratedGpu:
         // 核显温度变化比 WMI 快,每拍现取,让横条跟着动
-        return m_thermal ? m_thermal->integratedTemperatureC() : -1.0;
+        return m_thermal ? m_thermal->cpuProxyTemperatureC() : -1.0;
     case CpuTemperatureSource::None:
         break;
     }

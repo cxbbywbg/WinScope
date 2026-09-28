@@ -63,6 +63,13 @@ class BITMAPINFOHEADER(ctypes.Structure):
 
 
 def find_window(pid):
+    """找出这个进程里可见的、标题带 WinScope 的顶层窗口,大的排前面。
+
+    以前这里写死了 >300x200 的尺寸过滤,后来加了桌面小窗(288x187 逻辑像素)
+    就被整个过滤掉了 —— 小窗模式下主界面是藏着的,于是找不到任何窗口,
+    调用方直接 IndexError。现在只挡掉 IME 那种 0x0 的隐形窗口,再按面积从大到小
+    排:主窗口一定比小窗大,两个都可见时不会选错。
+    """
     found = []
     enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
@@ -73,7 +80,7 @@ def find_window(pid):
             return True
         rect = wintypes.RECT()
         user32.GetWindowRect(hwnd, ctypes.byref(rect))
-        if rect.right - rect.left > 300 and rect.bottom - rect.top > 200:
+        if rect.right - rect.left > 80 and rect.bottom - rect.top > 60:
             n = user32.GetWindowTextLengthW(hwnd)
             buf = ctypes.create_unicode_buffer(n + 1)
             user32.GetWindowTextW(hwnd, buf, n + 1)
@@ -82,6 +89,13 @@ def find_window(pid):
         return True
 
     user32.EnumWindows(enum_proc(callback), 0)
+
+    def area(hwnd):
+        rect = wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        return (rect.right - rect.left) * (rect.bottom - rect.top)
+
+    found.sort(key=area, reverse=True)
     return found
 
 

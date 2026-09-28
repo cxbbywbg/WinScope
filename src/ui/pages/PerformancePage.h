@@ -74,7 +74,8 @@ private:
     BarRow *m_cpuTempBar = nullptr;
     BarRow *m_cpuPowerBar = nullptr;
     SegmentBar *m_cpuTimeBar = nullptr;
-    // 温度来源会变(ACPI 热区 / 核显传感器),变了才改标题和说明,免得每帧触发布局
+    // 温度来源会变(ACPI 热区 / 核显传感器),变了才改名称列的标题,免得每帧触发布局。
+    // 说明文字不跟着它走 —— 它的初值恰好就是"读不到",见 .cpp 里的说明
     CpuTemperatureSource m_cpuTempSource = CpuTemperatureSource::None;
     QString m_cpuDetailHint;
     // 主频曲线的量程要等第一次采样拿到睿频上限才能定,定一次就够
@@ -112,6 +113,9 @@ private:
         StatRow *totalRow = nullptr;
         StatRow *sharedRow = nullptr;
         QString lastTitle;
+        // 说明行的内容。温度不可用时要在说明里写清原因,这里记着上一次写过的内容,
+        // 免得每帧都去改 QLabel 触发重排
+        QString lastHint;
     };
     QVector<GpuColumn> m_gpuColumns;
     QWidget *m_gpuGrid = nullptr;

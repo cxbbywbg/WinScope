@@ -138,6 +138,78 @@ bool looksNvidia(const QString &name)
         || name.contains(QLatin1String("GeForce"), Qt::CaseInsensitive);
 }
 
+// 判断型号名看起来是不是 AMD APU 的核显。
+//
+// 为什么值得费这个劲:CPU 温度的兜底路径要求"这块 GPU 和 CPU 在同一颗 die 上",
+// 而这件事在 Windows 上没有可靠接口可查(MinGW 里没有 dxcore.h,手写 DXCore 的
+// COM 接口风险太高),只能靠型号名。而误判的代价是不对称的 ——
+//   漏判:CPU 温度留空,用户少看一个数;
+//   误判:把独显温度当成 CPU 温度显示出去,用户看到的是错数据。
+// 所以规则全部是"正面白名单",不认识的型号一律返回 false。
+//
+// 这里**刻意不**让 GpuAdapterDesc::integrated(按专用显存 <1GB 判的)参与判断:
+// 那个字段在 GpuSampler 里的定位是"标签用,判错了不影响数据",而 BIOS 把核显的
+// UMA 显存划到 1GB 以上时它就会漏判。用一个自己都标注了"低风险"的启发式去把守
+// 数据正确性,迟早在某台机器上以最难查的方式炸掉。
+bool looksLikeApuIntegratedName(const QString &adapterName)
+{
+    const QString s = normalizeModelName(adapterName);   // 大写,已去掉 (TM)/(R)/(C) 和空格
+    if (!s.contains(QLatin1String("RADEON")))
+        return false;
+
+    // 独显的产品线标记,命中任意一个就直接否掉
+    static const char *const kDiscreteMarkers[] = {
+        "RX",          // RX 6600M / RX Vega 64。会误伤笔记本营销名 "Radeon RX Vega 8",
+                       // 但驱动报出来的型号名不带 RX,可以接受
+        "FIREPRO",
+        "INSTINCT",
+        "RADEONPRO",   // Radeon Pro WX / Radeon Pro Vega
+        "VII",         // Radeon VII
+        "HD",          // 老独显 Radeon HD 8750M。会误伤同代 APU 的 "Radeon HD 8650G",
+                       // 但那是 2013 年的机器了,漏判只是温度留空
+        "R7",          // Radeon R7 260X,会误伤 Kaveri 的 "Radeon R7 Graphics",同上
+        "R9",
+    };
+    for (const char *marker : kDiscreteMarkers) {
+        if (s.contains(QLatin1String(marker)))
+            return false;
+    }
+
+    // 白名单一:核显的"占位名"。驱动没有具体型号可报时用这个,
+    //           "AMD Radeon(TM) Graphics" 归一化后是 "AMDRADEONGRAPHICS"
+    if (s.contains(QLatin1String("RADEONGRAPHICS")))
+        return true;
+
+    // 白名单二:Vega 核显,如 "AMD Radeon(TM) Vega 8 Graphics" / "Vega 11 Graphics"。
+    //           注意中间夹着数字,不能用 "VEGAGRAPHICS" 这种连写去匹配。
+    //           Vega 的独显型号一定带 RX(RX Vega 56/64)或 Pro 前缀,前面已经排除;
+    //           剩下的 "Radeon Vega Frontier Edition" 这种没有 Graphics 字样,也进不来
+    if (s.contains(QLatin1String("VEGA")) && s.contains(QLatin1String("GRAPHICS")))
+        return true;
+
+    // 白名单三:近几代 APU 的核显型号,"Radeon 680M" / "780M" / "890M",
+    //           形如 <RADEON><三位数字>M 结尾。带 M 的独显移动版一定还有
+    //           RX / Pro 前缀,前面已经排除了
+    const int n = s.size();
+    if (n >= 5 && s.endsWith(QLatin1Char('M'))) {
+        const bool threeDigits =
+            s.at(n - 4).isDigit() && s.at(n - 3).isDigit() && s.at(n - 2).isDigit();
+        if (threeDigits && s.left(n - 4).endsWith(QLatin1String("RADEON")))
+            return true;
+    }
+
+    return false;
+}
+
+// 温度数值到底是哪条路读出来的。CPU 温度代理必须来自 ADL(AMD),
+// 因为只有 AMD 的核显能和 CPU 共处一颗 die;NVIDIA 的读数永远是独显
+enum class ThermalBackend { None, Adl, Nvml, Nvapi };
+
+struct Reading {
+    double celsius = -1.0;
+    ThermalBackend backend = ThermalBackend::None;
+};
+
 bool tempLooksSane(int celsius)
 {
     return celsius >= kMinTempC && celsius <= kMaxTempC;
@@ -178,7 +250,7 @@ struct ThermalProvider::Impl {
     bool loaded = false;
     QString summary;
 
-    mutable QVector<double> cache;
+    mutable QVector<Reading> cache;
     mutable qint64 cacheMs = 0;
 
     bool loadAdl();
@@ -186,7 +258,7 @@ struct ThermalProvider::Impl {
     bool loadNvapi();
 
     double adlTemperature(int adapterIndex) const;
-    double readOne(const ThermalTarget &target) const;
+    Reading readOne(const ThermalTarget &target) const;
     void refreshCache() const;
 };
 
@@ -397,10 +469,11 @@ double ThermalProvider::Impl::adlTemperature(int adapterIndex) const
     return -1.0;
 }
 
-double ThermalProvider::Impl::readOne(const ThermalTarget &target) const
+Reading ThermalProvider::Impl::readOne(const ThermalTarget &target) const
 {
+    Reading result;
     if (target.name.isEmpty())
-        return -1.0;
+        return result;
 
     // ---- AMD:ADL 的条目是"显示适配器",一块卡会拆成好几条,
     //      所以只能按型号名匹配,不能拿序号对应
@@ -409,8 +482,11 @@ double ThermalProvider::Impl::readOne(const ThermalTarget &target) const
             if (!nameMatches(e.name, target.name))
                 continue;
             const double t = adlTemperature(e.index);
-            if (t >= 0.0)
-                return t;
+            if (t >= 0.0) {
+                result.celsius = t;
+                result.backend = ThermalBackend::Adl;
+                return result;
+            }
             // 名字对上了但读不到,说明这块卡不走 ADL(NVIDIA 的条目也会出现在
             // ADL 列表里,一律返回 ADL_ERR_NOT_SUPPORTED),别再试同名的其它条目
             break;
@@ -432,8 +508,11 @@ double ThermalProvider::Impl::readOne(const ThermalTarget &target) const
         if (idx >= 0) {
             unsigned int value = 0;
             if (nvmlGetTemp(nvmlDevices.at(idx), kNvmlTemperatureGpu, &value) == 0
-                && tempLooksSane(int(value)))
-                return double(value);
+                && tempLooksSane(int(value))) {
+                result.celsius = double(value);
+                result.backend = ThermalBackend::Nvml;
+                return result;
+            }
         }
     }
 
@@ -455,14 +534,17 @@ double ThermalProvider::Impl::readOne(const ThermalTarget &target) const
                 for (int s = 0; s < ts.count && s < kNvapiMaxThermalSensors; ++s) {
                     // 只认 GPU 核心的传感器,PCB / 显存的不算
                     if (ts.sensor[s].target == kNvapiThermalTargetGpu
-                        && tempLooksSane(ts.sensor[s].currentTemp))
-                        return double(ts.sensor[s].currentTemp);
+                        && tempLooksSane(ts.sensor[s].currentTemp)) {
+                        result.celsius = double(ts.sensor[s].currentTemp);
+                        result.backend = ThermalBackend::Nvapi;
+                        return result;
+                    }
                 }
             }
         }
     }
 
-    return -1.0;
+    return result;
 }
 
 void ThermalProvider::Impl::refreshCache() const
@@ -533,15 +615,29 @@ double ThermalProvider::temperatureC(int index) const
     m_impl->refreshCache();
     if (index < 0 || index >= m_impl->cache.size())
         return -1.0;
-    return m_impl->cache.at(index);
+    return m_impl->cache.at(index).celsius;
 }
 
-double ThermalProvider::integratedTemperatureC() const
+bool ThermalProvider::nameLooksLikeApuIntegrated(const QString &adapterName)
+{
+    return looksLikeApuIntegratedName(adapterName);
+}
+
+double ThermalProvider::cpuProxyTemperatureC() const
 {
     m_impl->refreshCache();
-    for (int i = 0; i < m_impl->targets.size(); ++i) {
-        if (m_impl->targets.at(i).integrated && i < m_impl->cache.size() && m_impl->cache.at(i) >= 0.0)
-            return m_impl->cache.at(i);
+    const int n = qMin(m_impl->targets.size(), m_impl->cache.size());
+    for (int i = 0; i < n; ++i) {
+        const Reading &reading = m_impl->cache.at(i);
+        if (reading.celsius < 0.0)
+            continue;
+        // 两条同时成立才算数:读数确实出自 ADL,且型号名是 AMD APU 的核显。
+        // 少任何一条都返回 -1 让界面留空 —— 宁可空着,不能拿独显温度冒充 CPU 温度
+        if (reading.backend != ThermalBackend::Adl)
+            continue;
+        if (!looksLikeApuIntegratedName(m_impl->targets.at(i).name))
+            continue;
+        return reading.celsius;
     }
     return -1.0;
 }

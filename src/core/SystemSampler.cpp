@@ -67,45 +67,93 @@ public slots:
             m_timer->start(m_intervalMs);
     }
 
+    // 参数用裸掩码,省得为了跨线程再注册一个元类型
+    void setScope(quint32 mask)
+    {
+        const SampleScope next(mask);
+        // 从关到开的通道,下一拍只用来重建基线(见 tick)
+        m_warmUp = next.mask() & ~m_scope.mask();
+        m_scope = next;
+    }
+
     void tick()
     {
-        // ---------- 系统快照:先发这个,它最便宜,界面能立刻有内容
-        SystemSnapshot snapshot;
+        // 通道关着的时候不采样,但也不清空 —— 沿用上一帧的值,这样用户从小窗
+        // 切回主界面时不会看到一片空白
+        SystemSnapshot snapshot = m_state;
         snapshot.timestampMs = QDateTime::currentMSecsSinceEpoch();
-        snapshot.cpu = m_cpu.sample();
-        snapshot.memory = m_mem.sample();
-        // 核显 + 独显的机器上 gpus 会有多条;gpu 取主显卡(独显优先),
-        // 概览页那种只放得下一个仪表的地方用它
-        snapshot.gpus = m_gpu.sampleAll();
-        snapshot.gpu = m_gpu.primary();
-        snapshot.disk = m_disk.sample();
-        snapshot.net = m_net.sample();
+
+        // 刚被打开的通道这一拍只用来重建基线,采出来的值丢掉:
+        // CPU / 磁盘 / 网络的速率都是"两次采样的差值 ÷ 间隔",直接拿关掉期间
+        // 攒了几十秒的差值来算,第一帧会变成"过去 N 秒的平均值",看着像数据不对。
+        // 从来没采过的通道没这个问题(没有旧基线可攒),照常取新值,否则会先闪一下 0
+        const quint32 rebuild = m_warmUp & m_sampled;
+        m_warmUp = 0;
+
+        if (m_scope.test(SampleScope::Cpu)) {
+            const CpuInfo fresh = m_cpu.sample();
+            m_sampled |= quint32(SampleScope::Cpu);
+            if (!(rebuild & quint32(SampleScope::Cpu)))
+                snapshot.cpu = fresh;
+        }
+        if (m_scope.test(SampleScope::Memory))
+            snapshot.memory = m_mem.sample();
+        if (m_scope.test(SampleScope::Gpu)) {
+            // 核显 + 独显的机器上 gpus 会有多条;gpu 取主显卡(独显优先),
+            // 概览页和小窗那种只放得下一个数的地方用它
+            const QVector<GpuInfo> gpus = m_gpu.sampleAll();
+            m_sampled |= quint32(SampleScope::Gpu);
+            if (!(rebuild & quint32(SampleScope::Gpu))) {
+                snapshot.gpus = gpus;
+                snapshot.gpu = m_gpu.primary();
+            }
+        }
+        if (m_scope.test(SampleScope::Disk)) {
+            const DiskInfo fresh = m_disk.sample();
+            m_sampled |= quint32(SampleScope::Disk);
+            if (!(rebuild & quint32(SampleScope::Disk)))
+                snapshot.disk = fresh;
+        }
+        if (m_scope.test(SampleScope::Network)) {
+            const NetInfo fresh = m_net.sample();
+            m_sampled |= quint32(SampleScope::Network);
+            if (!(rebuild & quint32(SampleScope::Network)))
+                snapshot.net = fresh;
+        }
 
         // ---------- 进程快照:把 GPU/网络数据注进去
-        const auto traffic = m_netMonitor.takeSnapshot();
-        ProcessExtras extras;
-        extras.gpuUsage = &m_gpu.perProcessUsage();
-        extras.gpuDedicated = &m_gpu.perProcessDedicated();
-        extras.gpuShared = &m_gpu.perProcessShared();
-        extras.netTraffic = &traffic;
+        ProcessSnapshot procSnap;
+        bool haveProc = false;
+        if (m_scope.test(SampleScope::Processes)) {
+            const auto traffic = m_netMonitor.takeSnapshot();
+            ProcessExtras extras;
+            extras.gpuUsage = &m_gpu.perProcessUsage();
+            extras.gpuDedicated = &m_gpu.perProcessDedicated();
+            extras.gpuShared = &m_gpu.perProcessShared();
+            extras.netTraffic = &traffic;
 
-        ProcessSnapshot procSnap = m_proc.sample(extras);
+            procSnap = m_proc.sample(extras);
 
-        // CPU 页要显示进程/线程/句柄总数,从这里回填
-        snapshot.cpu.processCount = procSnap.totalProcesses;
-        snapshot.cpu.threadCount = procSnap.totalThreads;
-        snapshot.cpu.handleCount = procSnap.totalHandles;
+            // CPU 页要显示进程/线程/句柄总数,从这里回填
+            snapshot.cpu.processCount = procSnap.totalProcesses;
+            snapshot.cpu.threadCount = procSnap.totalThreads;
+            snapshot.cpu.handleCount = procSnap.totalHandles;
+            haveProc = true;
+        }
+
         snapshot.valid = true;
-
+        m_state = snapshot;
+        // 系统快照先发:它最便宜,界面能立刻有内容;进程快照要枚举全系统,慢得多
         emit systemSnapshotReady(snapshot);
-        emit processSnapshotReady(procSnap);
+        if (haveProc)
+            emit processSnapshotReady(procSnap);
 
         // ---------- 低频项
-        if (m_tick % 5 == 0) {
+        if (m_tick % 5 == 0 && m_scope.test(SampleScope::Network)) {
             const auto connections = m_conn.sample();
             emit connectionsReady(connections);
         }
-        if (m_tick % 30 == 0) {
+        if (m_tick % 30 == 0 && m_scope.test(SampleScope::Disk)) {
             m_disk.refreshVolumes();
         }
 
@@ -132,6 +180,14 @@ private:
     QTimer *m_timer = nullptr;
     int m_intervalMs = 1000;
     int m_tick = 0;
+
+    SampleScope m_scope = sampleScopeAll();
+    // 已经采过至少一次的通道。用来区分"关掉期间攒了旧基线"和"从来没采过"
+    quint32 m_sampled = 0;
+    // 刚被打开、下一拍要重建基线的通道
+    quint32 m_warmUp = 0;
+    // 上一帧的完整状态。关掉的通道就沿用它的对应字段
+    SystemSnapshot m_state;
 };
 
 SystemSampler::SystemSampler(QObject *parent)
@@ -189,6 +245,17 @@ void SystemSampler::setInterval(int ms)
     m_intervalMs = ms;
     if (m_worker)
         QMetaObject::invokeMethod(m_worker, "setInterval", Qt::QueuedConnection, Q_ARG(int, ms));
+}
+
+void SystemSampler::setScope(SampleScope scope)
+{
+    if (m_scope == scope)
+        return;
+    m_scope = scope;
+    if (m_worker) {
+        QMetaObject::invokeMethod(m_worker, "setScope", Qt::QueuedConnection,
+                                  Q_ARG(quint32, scope.mask()));
+    }
 }
 
 void SystemSampler::refreshNow()
