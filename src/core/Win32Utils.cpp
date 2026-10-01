@@ -377,21 +377,37 @@ ComInitializer::~ComInitializer()
 
 // ------------------------------------------------------------ 其它
 
-void revealInExplorer(const QString &path)
+bool revealInExplorer(const QString &path)
 {
     if (path.isEmpty())
-        return;
+        return false;
+
     const QFileInfo fi(path);
-    if (fi.exists()) {
-        const QString native = QDir::toNativeSeparators(path);
-        const QString args = QStringLiteral("/select,\"%1\"").arg(native);
-        ShellExecuteW(nullptr, L"open", L"explorer.exe", toWide(args).c_str(), nullptr, SW_SHOWNORMAL);
-    } else {
-        // 文件已不存在,退到打开所在目录
-        const QString dir = QDir::toNativeSeparators(fi.absolutePath());
-        if (!dir.isEmpty())
-            ShellExecuteW(nullptr, L"open", L"explorer.exe", toWide(dir).c_str(), nullptr, SW_SHOWNORMAL);
-    }
+    const QString native = QDir::toNativeSeparators(path);
+    const QString dir = QDir::toNativeSeparators(fi.absolutePath());
+    const QString selectArgs = QStringLiteral("/select,\"%1\"").arg(native);
+
+    auto runExplorer = [](const QString &args) {
+        const HINSTANCE r =
+            ShellExecuteW(nullptr, L"open", L"explorer.exe", toWide(args).c_str(), nullptr, SW_SHOWNORMAL);
+        // ShellExecute 返回值 >32 才算成功,<=32 是错误码
+        return reinterpret_cast<INT_PTR>(r) > 32;
+    };
+
+    const bool known = fi.exists() && fi.isFile();
+    if (known && runExplorer(selectArgs))
+        return true;
+
+    // 退一步:直接打开所在目录。
+    // exists() 为假**不代表**文件真的不在 —— 例如 UWP 应用的
+    // C:\Program Files\WindowsApps\... 普通权限连目录属性都读不到,exists() 返回 false,
+    // 但资源管理器自己有权限进得去。所以这里必须再试一次,不能直接放弃。
+    if (!dir.isEmpty() && runExplorer(QStringLiteral("\"%1\"").arg(dir)))
+        return true;
+
+    // 最后兜一次:文件属性读不到时也试试 /select,失败就如实返回 false,
+    // 让调用方去提示,而不是静默什么都不发生
+    return !known && runExplorer(selectArgs);
 }
 
 bool runElevatedCommand(const QString &exe, const QString &args)

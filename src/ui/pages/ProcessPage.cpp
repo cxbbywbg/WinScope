@@ -42,6 +42,15 @@ enum Action {
     ActReveal,
 };
 
+// 行上挂 PID 的专用 role。
+//
+// 千万别改用 Qt::UserRole:那一格被 updateRow() 的 setCell() 拿去存「排序用的数值」了,
+// 名称列存的是 0.0。以前 currentProcess() 就是读第 0 列的 Qt::UserRole 当 PID,
+// 结果永远拿到 0 → 详情面板永远显示「系统空闲进程」,右键菜单里每个操作
+// (结束/挂起/优先级/打开文件所在位置…)都在 `info.pid == 0` 那关被拦下,
+// 一律弹「请先在列表中选中一个进程」。单独占一个 role 就不会再撞。
+constexpr int PidRole = Qt::UserRole + 2;
+
 bool isNumericColumn(int column)
 {
     return column != ProcessPage::ColName && column != ProcessPage::ColUser && column != ProcessPage::ColStatus;
@@ -376,6 +385,7 @@ void ProcessPage::updateRow(QTreeWidgetItem *item, const ProcessInfo &info)
     };
 
     setCell(ColName, info.name, 0.0);
+    item->setData(ColName, PidRole, info.pid);
     if (!info.description.isEmpty())
         item->setToolTip(ColName, QStringLiteral("%1\n%2").arg(info.description, info.path));
 
@@ -430,7 +440,7 @@ void ProcessPage::updateTree(const ProcessSnapshot &snapshot)
         item->setText(2, QStringLiteral("%1%").arg(info.cpuPercent, 0, 'f', 1));
         item->setText(3, formatBytes(info.workingSetBytes));
         item->setText(4, info.critical ? QStringLiteral("系统关键") : QStringLiteral("运行中"));
-        item->setData(0, Qt::UserRole, info.pid);
+        item->setData(0, PidRole, info.pid);
         return item;
     };
 
@@ -496,25 +506,43 @@ void ProcessPage::sortList()
     updateList(ProcessSnapshot());
 }
 
+QTreeWidgetItem *ProcessPage::currentRow() const
+{
+    if (m_list && m_list->isVisible())
+        return m_list->currentItem();
+    if (m_tree && m_tree->isVisible())
+        return m_tree->currentItem();
+    return nullptr;
+}
+
+bool ProcessPage::selectedProcess(ProcessInfo *out) const
+{
+    QTreeWidgetItem *item = currentRow();
+    if (!item)
+        return false;
+
+    const quint32 pid = item->data(0, PidRole).toUInt();
+    const auto it = m_byPid.constFind(pid);
+    if (it == m_byPid.constEnd())
+        return false;
+
+    if (out)
+        *out = it.value();
+    return true;
+}
+
 ProcessInfo ProcessPage::currentProcess() const
 {
-    QTreeWidgetItem *item = nullptr;
-    if (m_list && m_list->isVisible())
-        item = m_list->currentItem();
-    else if (m_tree && m_tree->isVisible())
-        item = m_tree->currentItem();
-    if (!item)
-        return ProcessInfo();
-
-    const quint32 pid = item->data(0, Qt::UserRole).toUInt();
-    return m_byPid.value(pid, ProcessInfo());
+    ProcessInfo info;
+    selectedProcess(&info);
+    return info;
 }
 
 void ProcessPage::refreshDetails()
 {
-    const ProcessInfo info = currentProcess();
-
-    if (info.pid == 0 && info.name.isEmpty()) {
+    ProcessInfo info;
+    // 别用「pid == 0 且名字为空」猜有没有选中:「系统空闲进程」就是 pid 0 的真实一行
+    if (!selectedProcess(&info)) {
         m_detailName->setText(QStringLiteral("未选择进程"));
         m_detailPath->setText(QStringLiteral("在左侧列表中选中一个进程查看详情"));
         for (auto *row : m_detailRows)
@@ -565,18 +593,24 @@ void ProcessPage::refreshDetails()
 
 void ProcessPage::runAction(int action)
 {
-    const ProcessInfo info = currentProcess();
-    if (info.pid == 0) {
+    ProcessInfo info;
+    if (!selectedProcess(&info)) {
         QMessageBox::information(this, QStringLiteral("未选择进程"),
                                  QStringLiteral("请先在列表中选中一个进程。"));
         return;
     }
 
     if (action == ActReveal) {
-        if (info.path.isEmpty())
-            QMessageBox::warning(this, QStringLiteral("无法定位"), QStringLiteral("该进程的路径不可见。"));
-        else
-            revealInExplorer(info.path);
+        if (info.path.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("无法定位"),
+                                 QStringLiteral("读不到「%1」(PID %2) 的可执行文件路径。\n"
+                                                "该进程可能受系统保护,或需要管理员权限。")
+                                     .arg(info.name)
+                                     .arg(info.pid));
+        } else if (!revealInExplorer(info.path)) {
+            QMessageBox::warning(this, QStringLiteral("无法打开"),
+                                 QStringLiteral("无法在资源管理器中打开:\n%1").arg(info.path));
+        }
         return;
     }
 
@@ -654,8 +688,23 @@ void ProcessPage::statusBarMessage(const QString &text)
 void ProcessPage::showContextMenu(const QPoint &pos)
 {
     QTreeWidget *source = qobject_cast<QTreeWidget *>(sender());
-    if (!source || !source->currentItem())
+    if (!source)
         return;
+
+    // 右键点在哪一行就作用于哪一行。
+    //
+    // 以前这里写的是「currentItem() 为空就直接 return」,两个问题:
+    //   1) 用户的心理模型就是「我右键的是这一行」。没先左键点一下时,
+    //      菜单要么不弹、要么作用于上一次选中的那一行 —— 两种都很费解;
+    //   2) 列表每秒刷新一次(updateList 里 sortItems 会把行取出来重排),
+    //      选中项未必还在用户以为的那一行上。
+    // 先按 pos 找到光标下那一行并设为当前行,后面的 runAction()/selectedProcess()
+    // 一律读当前行,整条链路就只有一个真相。
+    QTreeWidgetItem *item = source->itemAt(pos);
+    if (!item)
+        return;                     // 点在空白处:不弹菜单
+    if (source->currentItem() != item)
+        source->setCurrentItem(item);
 
     QMenu menu(this);
     menu.addAction(QStringLiteral("结束进程"), this, [this]() { runAction(ActClose); });
@@ -670,8 +719,8 @@ void ProcessPage::showContextMenu(const QPoint &pos)
     const QStringList names = ProcessController::priorityNames();
     for (int i = 0; i < names.size(); ++i) {
         priorityMenu->addAction(names.at(i), this, [this, i]() {
-            const ProcessInfo info = currentProcess();
-            if (info.pid == 0)
+            ProcessInfo info;
+            if (!selectedProcess(&info))
                 return;
             const auto result = ProcessController::setPriority(info.pid, ProcessController::priorityValueAt(i));
             if (!result.ok)
@@ -698,8 +747,8 @@ void ProcessPage::showContextMenu(const QPoint &pos)
 
 void ProcessPage::chooseAffinity()
 {
-    const ProcessInfo info = currentProcess();
-    if (info.pid == 0)
+    ProcessInfo info;
+    if (!selectedProcess(&info))
         return;
 
     quint64 mask = 0;

@@ -55,6 +55,10 @@ private:
 
     QHash<quint32, ProcTimes> m_prev;
     QHash<quint32, QString> m_pathCache;
+    // pid -> 路径已经查失败过几次。路径查不到时不能把空值当成「查过了」永久缓存
+    // (见 fillDetails),但也不能每帧重试 —— 非提权下有一百多个 SYSTEM 进程
+    // 永远读不到映像路径,每帧白跑一遍 OpenProcess。用这个计数封顶。
+    QHash<quint32, int> m_pathRetry;
     QHash<quint32, QString> m_userCache;
     QHash<quint32, QString> m_cmdCache;
     QHash<quint32, QString> m_archCache;

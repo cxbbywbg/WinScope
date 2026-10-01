@@ -76,8 +76,9 @@ private:
 
 // ------------------------------------------------------------ 其它
 
-// 打开文件/文件夹所在位置(资源管理器选中)
-void revealInExplorer(const QString &path);
+// 打开文件/文件夹所在位置(资源管理器选中)。成功返回 true;
+// 返回 false 表示资源管理器没能起来,调用方应当给出提示,不要静默失败
+bool revealInExplorer(const QString &path);
 // 以管理员身份打开一个 shell 命令(用于工具箱)
 bool runElevatedCommand(const QString &exe, const QString &args);
 // 用 ShellExecute 启动目标。.msc / 控制面板项这类东西不能直接 CreateProcess,

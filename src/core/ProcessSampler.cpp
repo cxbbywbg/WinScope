@@ -132,15 +132,35 @@ void ProcessSampler::refreshCommandLines()
     }
 }
 
+// 路径查不到时最多再补查几次。给几次是因为首次采样时进程可能刚创建(OpenProcess
+// 一时失败),但必须封顶 —— 非提权下有一百多个 SYSTEM 进程是**永远**读不到映像路径的。
+static constexpr int kPathRetryLimit = 5;
+
 void ProcessSampler::fillDetails(ProcessInfo *info, bool allowQuery)
 {
     const quint32 pid = info->pid;
 
     // ---- 路径(顺带确定文件说明)
-    auto pathIt = m_pathCache.constFind(pid);
-    if (pathIt == m_pathCache.constEnd() && allowQuery)
-        pathIt = m_pathCache.insert(pid, queryProcessPath(pid));
-    if (pathIt != m_pathCache.constEnd())
+    //
+    // **查不到时不能把空值当成「已经查过了」永久缓存。**
+    // 以前就是无脑 insert(queryProcessPath(pid)),失败也照存,于是 firstSight
+    // 永远是 false、再也不会重试:首次采样时进程可能刚创建或正在退出,OpenProcess
+    // 一时失败,那一行的路径就永久空着,「打开文件所在位置」也就永远点不动。
+    // 实测踩过 —— 同一份 WorkBuddyAI.exe,一个 pid 报得出路径、另一个报不出,
+    // 而 Python 用同一套 API 两个都查得到。
+    //
+    // 但也不能无限重试:非提权下有一百多个 SYSTEM 进程根本读不到映像路径,
+    // 每帧都去 OpenProcess 一遍纯属浪费。所以给固定次数的重试预算,用完就认命。
+    auto pathIt = m_pathCache.find(pid);
+    if (pathIt == m_pathCache.end())
+        pathIt = m_pathCache.insert(pid, allowQuery ? queryProcessPath(pid) : QString());
+    else if (pathIt.value().isEmpty() && m_pathRetry.value(pid, 0) < kPathRetryLimit) {
+        m_pathRetry.insert(pid, m_pathRetry.value(pid, 0) + 1);
+        const QString path = queryProcessPath(pid);
+        if (!path.isEmpty())
+            pathIt.value() = path;
+    }
+    if (pathIt != m_pathCache.end())
         info->path = pathIt.value();
 
     if (info->name.isEmpty() && !info->path.isEmpty())
@@ -216,9 +236,15 @@ ProcessInfo ProcessSampler::describe(quint32 pid) const
 
 void ProcessSampler::dropStaleCache(const QVector<ProcessInfo> &list)
 {
-    // 缓存只在进程数明显缩水时清理,避免每帧做哈希重建
-    if (m_pathCache.size() < list.size() + 512)
-        return;
+    // 每帧都清一遍已经退出的 pid。
+    //
+    // 以前这里有个「缓存没比存活数多 512 就不清」的短路,想省掉每帧的哈希重建。
+    // 但代价是**几百个已经退出的 pid 会长期赖在缓存里**,而 Windows 会把 pid
+    // 回收再分配:新进程于是读到上一个进程的路径,「打开文件所在位置」会打开
+    // 错的目录 —— 那比读不到更糟。这点开销(建一个 ~300 元素的 QSet、扫几张哈希)
+    // 是微秒级的,不值得拿正确性去换。
+    if (list.isEmpty())
+        return;                     // 采样异常时别把缓存整个清空
 
     QSet<quint32> alive;
     alive.reserve(list.size());
@@ -228,6 +254,12 @@ void ProcessSampler::dropStaleCache(const QVector<ProcessInfo> &list)
     for (auto it = m_pathCache.begin(); it != m_pathCache.end();) {
         if (!alive.contains(it.key()))
             it = m_pathCache.erase(it);
+        else
+            ++it;
+    }
+    for (auto it = m_pathRetry.begin(); it != m_pathRetry.end();) {
+        if (!alive.contains(it.key()))
+            it = m_pathRetry.erase(it);
         else
             ++it;
     }

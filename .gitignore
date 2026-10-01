@@ -27,6 +27,10 @@ ui_*.h
 *.dll
 !packaging/**/*.dll
 
+# Python 缓存(tools/ 下的脚本用 py_compile 检查过语法就会留下)
+__pycache__/
+*.pyc
+
 # 编辑器 / 系统
 .vs/
 .vscode/

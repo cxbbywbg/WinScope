@@ -64,6 +64,12 @@ private:
     void sortList();
 
     bool passesFilter(const ProcessInfo &info) const;
+
+    // 当前视图(列表页签优先,否则进程树页签)里选中的那一行;没选中返回 nullptr
+    QTreeWidgetItem *currentRow() const;
+    // 取出选中行的进程信息。**别用 pid == 0 判断「没选中」** ——
+    // 「系统空闲进程」本身就是 pid 0,是个能正常选中的行。
+    bool selectedProcess(ProcessInfo *out) const;
     ProcessInfo currentProcess() const;
 
     void refreshDetails();

@@ -242,7 +242,9 @@ void StartupPage::openFileLocation()
                                  QStringLiteral("这一项没有可定位的文件路径。"));
         return;
     }
-    revealInExplorer(item.filePath);
+    if (!revealInExplorer(item.filePath))
+        QMessageBox::warning(this, QStringLiteral("无法打开"),
+                             QStringLiteral("无法在资源管理器中打开:\n%1").arg(item.filePath));
 }
 
 void StartupPage::openRegistryLocation()
